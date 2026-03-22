@@ -5,6 +5,7 @@ Handles categorical feature encoding with multiple strategies.
 Supports both interactive and automatic modes.
 """
 
+import re
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
@@ -43,6 +44,10 @@ class FeatureEncoder:
             Tuple of (encoded_df, encoding_info)
         """
         df_encoded = df.copy()
+        
+        # --- Feature Engineering: extract useful features before encoding ---
+        df_encoded = self._extract_name_features(df_encoded)
+        
         categorical_cols = df_encoded.select_dtypes(include=['object']).columns.tolist()
         
         # Remove target column from encoding if it exists and is categorical
@@ -74,6 +79,60 @@ class FeatureEncoder:
             self.encoding_info[col] = col_info
         
         return df_encoded, self.encoding_info
+    
+    def _extract_name_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Feature engineering: extract useful low-cardinality features from
+        high-cardinality columns before they are dropped.
+        
+        - Name → Title (Mr, Miss, Mrs, Master, Rare)
+        - Ticket → dropped (no useful signal)
+        
+        Returns:
+            DataFrame with engineered features
+        """
+        # --- Extract Title from Name ---
+        if "Name" in df.columns:
+            df["Title"] = df["Name"].str.extract(r",\s*([^\.]+)\.", expand=False)
+            
+            # Map to grouped titles
+            title_map = {
+                "Mr": "Mr",
+                "Miss": "Miss", "Mlle": "Miss", "Ms": "Miss",
+                "Mrs": "Mrs", "Mme": "Mrs",
+                "Master": "Master",
+            }
+            df["Title"] = df["Title"].map(lambda t: title_map.get(t.strip(), "Rare") if pd.notna(t) else "Rare")
+            
+            # Drop original Name column
+            df = df.drop(columns=["Name"])
+            
+            title_counts = df["Title"].value_counts().to_dict()
+            logger.info(f"Extracted Title from Name → {title_counts}")
+            print(f"🏷️  Extracted 'Title' from 'Name' → {title_counts}")
+            
+            self.encoding_info["Name"] = {
+                "original_column": "Name",
+                "unique_values": 0,
+                "encoding_method": "feature_engineered → Title",
+                "new_columns": ["Title"],
+                "title_distribution": title_counts,
+            }
+        
+        # --- Drop Ticket (no useful signal) ---
+        if "Ticket" in df.columns:
+            df = df.drop(columns=["Ticket"])
+            logger.info("Dropped 'Ticket' column (no useful signal)")
+            print("🗑️  Dropped 'Ticket' column (no useful signal)")
+            
+            self.encoding_info["Ticket"] = {
+                "original_column": "Ticket",
+                "unique_values": 0,
+                "encoding_method": "dropped (pre-encoding)",
+                "new_columns": [],
+            }
+        
+        return df
     
     def _encode_column(self, df: pd.DataFrame, col: str) -> Tuple[pd.DataFrame, Dict[str, any]]:
         """
@@ -173,14 +232,26 @@ class FeatureEncoder:
             elif general_strategy in ["onehot", "one-hot", "onehot_encoding"]:
                 return "2"
         
-        # Fallback to original heuristics if no LLM recommendations
-        # Heuristic: Use one-hot for high cardinality, label for low cardinality
-        if unique_values > 10:
-            logger.info(f"Auto-selecting one-hot encoding for {col} (high cardinality: {unique_values})")
-            return "2"
+        # Fallback to heuristics if no LLM recommendations
+        # High-cardinality columns cause feature explosion and numerical overflow
+        HIGH_CARDINALITY_THRESHOLD = 20
+        
+        if unique_values > HIGH_CARDINALITY_THRESHOLD:
+            logger.info(
+                f"Dropping high-cardinality column {col} "
+                f"({unique_values} unique values) - too high for encoding"
+            )
+            print(
+                f"🗑️  Dropping high-cardinality column {col} "
+                f"({unique_values} unique values) - too high for encoding"
+            )
+            return "3"  # Drop
+        elif unique_values > 2:
+            logger.info(f"Auto-selecting one-hot encoding for {col} (cardinality: {unique_values})")
+            return "2"  # One-hot
         else:
-            logger.info(f"Auto-selecting label encoding for {col} (low cardinality: {unique_values})")
-            return "1"
+            logger.info(f"Auto-selecting label encoding for {col} (cardinality: {unique_values})")
+            return "1"  # Label
     
     def _apply_label_encoding(self, df: pd.DataFrame, col: str, col_info: Dict) -> Tuple[pd.DataFrame, Dict]:
         """

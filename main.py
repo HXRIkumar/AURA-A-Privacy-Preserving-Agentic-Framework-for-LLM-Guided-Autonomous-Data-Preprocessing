@@ -6,7 +6,7 @@ Dataset-agnostic preprocessing pipeline with comprehensive reporting and LLM exp
 
 import sys
 import os
-from src.pipeline import AuraPipeline
+from backend.backend.core.pipeline import AuraPipeline
 
 def main():
     """Main function to run the AURA Preprocessor 2.0 pipeline."""

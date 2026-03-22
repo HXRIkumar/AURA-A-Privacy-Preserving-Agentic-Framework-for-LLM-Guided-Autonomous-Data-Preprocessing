@@ -97,49 +97,130 @@ class AuraPipeline:
     
     def _detect_target_column(self) -> None:
         """
-        Auto-detect the target column if not specified.
+        Auto-detect the target column using a multi-signal scoring system.
+
+        Scoring rules (cumulative):
+          +100  exact name match (target, label, class, survived, approved, …)
+           +50  substring/suffix match (_approved, _target, _class, _flag, …)
+           +30  binary column (exactly 2 unique non-null values)
+           +20  column is among the last 3 in the dataframe
+           +10  low cardinality (≤ 10 unique) categorical / object column
+
+        Hard exclusions (score = -∞):
+          - column name is 'id' / 'ID' or ends with '_id'
+          - column name contains 'name', 'date', 'time', 'index', 'ticket', 'cabin'
+          - numeric column with range > 100 and > 20 unique values (likely continuous)
+
+        Tiebreaker: lowest cardinality wins.
         """
         if self.original_df is None:
             raise ValueError("Dataset not loaded. Cannot detect target column.")
-        
-        if self.target_col is None:
-            # Common target column names
-            target_candidates = [
-                'target', 'label', 'y', 'class', 'outcome', 'result',
-                'survived', 'price', 'sales', 'revenue', 'profit', 'pclass'
-            ]
-            
-            # Exclude ID-like columns and names
-            exclude_patterns = ['id', 'ticket', 'name', 'passenger', 'index', 'cabin']
-            
-            def is_valid_target(col_name: str) -> bool:
-                """Check if column name is a valid target (not an ID column)"""
-                col_lower = col_name.lower()
-                return not any(pattern in col_lower for pattern in exclude_patterns)
-            
-            # Look for exact matches first
-            for candidate in target_candidates:
-                if candidate in self.original_df.columns and is_valid_target(candidate):
-                    self.target_col = candidate
-                    break
-            
-            # If no exact match, look for partial matches
-            if self.target_col is None:
-                for col in self.original_df.columns:
-                    col_lower = col.lower()
-                    if any(candidate in col_lower for candidate in target_candidates) and is_valid_target(col):
-                        self.target_col = col
-                        break
-            
-            # If still no match, use the last column that's not an ID column
-            if self.target_col is None:
-                valid_columns = [col for col in self.original_df.columns if is_valid_target(col)]
-                if valid_columns:
-                    self.target_col = valid_columns[-1]
-                else:
-                    self.target_col = self.original_df.columns[-1]
-                logger.warning(f"No target column detected, using: {self.target_col}")
-        
+
+        if self.target_col is not None:
+            logger.info(f"Target column (user-specified): {self.target_col}")
+            print(f"🎯 Target column: {self.target_col}")
+            return
+
+        df = self.original_df
+
+        # ── Exact names that are almost always the target ──
+        EXACT_NAMES = {
+            "target", "label", "class", "survived", "outcome", "result",
+            "approved", "loan_approved", "churn", "churned", "default", "fraud",
+            "is_fraud", "diagnosis", "grade", "passed", "status", "attrition", "y",
+        }
+
+        # ── Substrings / suffixes that suggest a target column ──
+        TARGET_SUBSTRINGS = [
+            "_approved", "_label", "_target", "_class", "_outcome",
+            "_flag", "_status", "_result", "is_", "has_",
+        ]
+
+        # ── Patterns that should NEVER be the target ──
+        EXCLUDE_EXACT = {"id", "index"}
+        EXCLUDE_CONTAINS = ["name", "date", "time", "ticket", "cabin", "passport", "address"]
+
+        def _is_excluded(col_name: str) -> bool:
+            col_lower = col_name.lower().strip()
+            # Exact matches
+            if col_lower in EXCLUDE_EXACT:
+                return True
+            # Ends with _id
+            if col_lower.endswith("_id"):
+                return True
+            # Contains forbidden substrings
+            if any(pat in col_lower for pat in EXCLUDE_CONTAINS):
+                return True
+            return False
+
+        def _is_high_range_numeric(col_name: str) -> bool:
+            """Returns True for continuous numerics that are NOT targets."""
+            if not pd.api.types.is_numeric_dtype(df[col_name]):
+                return False
+            nunique = df[col_name].nunique()
+            if nunique <= 20:
+                return False  # low-cardinality numeric is fine (e.g. 0/1)
+            col_range = df[col_name].max() - df[col_name].min()
+            return col_range > 100
+
+        n_cols = len(df.columns)
+        last_3_positions = set(range(max(0, n_cols - 3), n_cols))
+        scores = {}
+
+        for idx, col in enumerate(df.columns):
+            if _is_excluded(col):
+                continue
+            if _is_high_range_numeric(col):
+                continue
+
+            score = 0
+            col_lower = col.lower().strip()
+            nunique = int(df[col].nunique())
+
+            # Rule 1: exact name match
+            if col_lower in EXACT_NAMES:
+                score += 100
+
+            # Rule 2: substring / suffix match
+            if any(pat in col_lower for pat in TARGET_SUBSTRINGS):
+                score += 50
+
+            # Rule 3: binary column bonus
+            if nunique == 2:
+                score += 30
+
+            # Rule 4: positional bonus (last 3 columns)
+            if idx in last_3_positions:
+                score += 20
+
+            # Rule 5: low-cardinality categorical bonus
+            if nunique <= 10 and (
+                pd.api.types.is_object_dtype(df[col])
+                or pd.api.types.is_categorical_dtype(df[col])
+                or nunique <= 5
+            ):
+                score += 10
+
+            # Store score + cardinality for tiebreaking
+            scores[col] = (score, nunique)
+
+        if scores:
+            # Sort by score DESC, then cardinality ASC (tiebreaker: fewer unique = more target-like)
+            best_col = sorted(scores.items(), key=lambda x: (-x[1][0], x[1][1]))[0][0]
+            best_score = scores[best_col][0]
+            self.target_col = best_col
+
+            if best_score >= 100:
+                logger.info(f"Target column detected (high confidence): {self.target_col} (score={best_score})")
+            elif best_score >= 30:
+                logger.info(f"Target column detected (medium confidence): {self.target_col} (score={best_score})")
+            else:
+                logger.warning(f"Target column guessed (low confidence): {self.target_col} (score={best_score})")
+        else:
+            # Absolute fallback: last column
+            self.target_col = df.columns[-1]
+            logger.warning(f"No valid target column candidates — falling back to last column: {self.target_col}")
+
         logger.info(f"Target column: {self.target_col}")
         print(f"🎯 Target column: {self.target_col}")
     

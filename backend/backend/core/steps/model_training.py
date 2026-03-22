@@ -1,8 +1,9 @@
 """
 Model Training Module for AURA Preprocessor 2.0
 
-Handles machine learning model training with multiple algorithms.
-Supports both interactive and automatic modes.
+Handles machine learning model training with automatic model comparison.
+Trains ALL candidate models, evaluates each with cross-validation,
+and selects the best performer automatically.
 """
 
 import pandas as pd
@@ -11,18 +12,57 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score, classification_report, confusion_matrix,
+    precision_score, recall_score, f1_score
+)
 from typing import Dict, List, Tuple, Optional, Union, Any
 import logging
 import joblib
 import os
+import warnings
 
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Candidate Model Definitions
+# =============================================================================
+
+def _build_candidate_models() -> List[Tuple[str, Any]]:
+    """
+    Build the list of ALL candidate models to compare.
+    Each entry is (display_name, model_instance).
+    """
+    return [
+        ("Logistic Regression", LogisticRegression(
+            solver="saga",
+            max_iter=5000,
+            C=1.0,
+            random_state=42,
+            n_jobs=-1,
+        )),
+        ("Random Forest", RandomForestClassifier(
+            n_estimators=200,
+            max_depth=10,
+            random_state=42,
+        )),
+        ("Gradient Boosting", GradientBoostingClassifier(
+            n_estimators=200,
+            learning_rate=0.05,
+            random_state=42,
+        )),
+        ("SVC (RBF)", SVC(
+            kernel="rbf",
+            probability=True,
+            random_state=42,
+        )),
+    ]
+
+
 class ModelTrainer:
     """
-    Handles machine learning model training with multiple algorithms.
+    Handles machine learning model training with automatic model comparison.
     """
     
     def __init__(self, mode: str = "auto"):
@@ -45,6 +85,9 @@ class ModelTrainer:
                    random_state: int = 42) -> Dict[str, Any]:
         """
         Train a machine learning model.
+        
+        In AUTO mode, trains ALL 4 candidate models, evaluates each with
+        cross-validation, and selects the best one automatically.
         
         Args:
             X: Feature matrix
@@ -70,22 +113,27 @@ class ModelTrainer:
             
             logger.info(f"Data split: Train {X_train.shape[0]} samples, Test {X_test.shape[0]} samples")
             
-            # Select model
             if self.mode == "step":
-                model_name = self._get_user_model_choice()
+                # Interactive: let user pick a single model
+                model_choice = self._get_user_model_choice()
+                candidates = _build_candidate_models()
+                idx = int(model_choice) - 1
+                name, model = candidates[idx]
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model.fit(X_train, y_train)
+                self.model = model
+                self.model_name = name
             else:
-                model_name = self._get_auto_model_choice(X_train, y_train)
+                # AUTO: compare ALL models and pick the best
+                self.model, self.model_name = self._compare_and_select(X_train, y_train)
             
-            # Train the model
-            self.model, actual_model_name = self._train_selected_model(model_name, X_train, y_train)
-            self.model_name = actual_model_name
-            
-            # Evaluate the model
+            # Evaluate the winning model
             results = self._evaluate_model(X_test, y_test, target_col)
             
             # Store training information
             self.training_info = {
-                "model_name": actual_model_name,
+                "model_name": self.model_name,
                 "target_column": target_col,
                 "train_size": X_train.shape[0],
                 "test_size": X_test.shape[0],
@@ -108,10 +156,10 @@ class ModelTrainer:
             User's choice as string
         """
         print("\n⚡ Model selection options:")
-        print("   1) Random Forest (recommended for most cases)")
-        print("   2) Gradient Boosting (good for complex patterns)")
-        print("   3) Logistic Regression (fast, interpretable)")
-        print("   4) Support Vector Machine (good for small datasets)")
+        print("   1) Logistic Regression (saga solver, stable)")
+        print("   2) Random Forest (robust, handles noise)")
+        print("   3) Gradient Boosting (best for complex patterns)")
+        print("   4) SVC with RBF kernel (good for small datasets)")
         
         while True:
             choice = input("👉 Enter choice: ").strip()
@@ -119,90 +167,86 @@ class ModelTrainer:
                 return choice
             print("⚠️ Invalid choice. Please enter 1, 2, 3, or 4.")
     
-    def _get_auto_model_choice(self, X_train: np.ndarray, y_train: np.ndarray) -> str:
+    # -----------------------------------------------------------------
+    # Model Comparison Engine
+    # -----------------------------------------------------------------
+
+    def _compare_and_select(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+    ) -> Tuple[Any, str]:
         """
-        Automatically choose model based on data characteristics.
-        
+        Train ALL 4 candidate models, score each with 5-fold CV,
+        and return the best one.
+
         Args:
             X_train: Training features
             y_train: Training targets
             
         Returns:
-            Auto-selected model type
+            Tuple of (best_model, best_model_name)
         """
-        n_samples, n_features = X_train.shape
-        
-        # Heuristic-based model selection
-        if n_samples < 1000:
-            logger.info(f"Small dataset ({n_samples} samples), using Logistic Regression")
-            return "3"  # Logistic Regression
-        elif n_features > n_samples * 0.1:  # High dimensional
-            logger.info(f"High dimensional data ({n_features} features), using Random Forest")
-            return "1"  # Random Forest
-        else:
-            logger.info(f"Standard dataset, using Random Forest")
-            return "1"  # Random Forest
-    
-    def _train_selected_model(self, model_choice: str, X_train: np.ndarray, y_train: np.ndarray):
-        """
-        Train the selected model.
-        
-        Args:
-            model_choice: Selected model type
-            X_train: Training features
-            y_train: Training targets
-            
-        Returns:
-            Tuple of (trained_model, model_name_string)
-        """
-        if model_choice == "1":  # Random Forest
-            model = RandomForestClassifier(
-                n_estimators=100,
-                random_state=42,
-                max_depth=10,
-                min_samples_split=5
-            )
-            model_name = "Random Forest"
-            print("🌲 Training Random Forest...")
-            
-        elif model_choice == "2":  # Gradient Boosting
-            model = GradientBoostingClassifier(
-                n_estimators=100,
-                random_state=42,
-                max_depth=6,
-                learning_rate=0.1
-            )
-            model_name = "Gradient Boosting"
-            print("📈 Training Gradient Boosting...")
-            
-        elif model_choice == "3":  # Logistic Regression
-            model = LogisticRegression(
-                random_state=42,
-                max_iter=1000
-            )
-            model_name = "Logistic Regression"
-            print("📊 Training Logistic Regression...")
-            
-        elif model_choice == "4":  # SVM
-            model = SVC(
-                random_state=42,
-                probability=True
-            )
-            model_name = "Support Vector Machine"
-            print("🎯 Training Support Vector Machine...")
-            
-        else:
-            raise ValueError(f"Invalid model choice: {model_choice}")
-        
-        # Train the model
-        model.fit(X_train, y_train)
-        logger.info(f"Successfully trained {model_name}")
-        
-        return model, model_name
-    
+        candidates = _build_candidate_models()
+        n_samples = X_train.shape[0]
+
+        print("\n🔬 MODEL COMPARISON — training all candidates...")
+        print(f"   Samples: {n_samples}  |  Features: {X_train.shape[1]}")
+        print("-" * 55)
+
+        best_score = -1.0
+        best_model = None
+        best_name = ""
+        comparison_results = []
+
+        for name, model in candidates:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model.fit(X_train, y_train)
+
+                    # Use min(5, n_samples) folds to avoid errors on tiny datasets
+                    cv_folds = min(5, X_train.shape[0])
+                    scores = cross_val_score(model, X_train, y_train, cv=cv_folds, scoring="accuracy")
+
+                mean_cv = float(np.mean(scores))
+                std_cv = float(np.std(scores))
+
+                comparison_results.append({
+                    "model": name,
+                    "cv_mean": mean_cv,
+                    "cv_std": std_cv,
+                })
+
+                status = "  "
+                if mean_cv > best_score:
+                    best_score = mean_cv
+                    best_model = model
+                    best_name = name
+
+                print(f"   {name:<25s}  CV={mean_cv:.4f} (±{std_cv:.4f})")
+                logger.info(f"Model comparison — {name}: CV={mean_cv:.4f} ±{std_cv:.4f}")
+
+            except Exception as exc:
+                logger.warning(f"Model {name} failed during comparison: {exc}")
+                print(f"   {name:<25s}  ⚠️ FAILED — {exc}")
+
+        print("-" * 55)
+        print(f"   🏆 Winner: {best_name} (CV={best_score:.4f})")
+        logger.info(f"Model comparison winner: {best_name} with CV={best_score:.4f}")
+
+        # Store comparison for the report
+        self.training_info["model_comparison"] = comparison_results
+
+        return best_model, best_name
+
+    # -----------------------------------------------------------------
+    # Evaluation
+    # -----------------------------------------------------------------
+
     def _evaluate_model(self, X_test: np.ndarray, y_test: np.ndarray, target_col: str) -> Dict[str, Any]:
         """
-        Evaluate the trained model.
+        Evaluate the trained model with comprehensive metrics.
         
         Args:
             X_test: Test features
@@ -217,20 +261,25 @@ class ModelTrainer:
             y_pred = self.model.predict(X_test)
             y_pred_proba = self.model.predict_proba(X_test) if hasattr(self.model, 'predict_proba') else None
             
-            # Calculate metrics
-            accuracy = accuracy_score(y_test, y_pred)
+            # Core metrics
+            acc = accuracy_score(y_test, y_pred)
+            prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+            rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+            f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
             
-            # Cross-validation score
-            cv_scores = cross_val_score(self.model, X_test, y_test, cv=5)
+            # Cross-validation on test set
+            cv_folds = min(5, X_test.shape[0])
+            cv_scores = cross_val_score(self.model, X_test, y_test, cv=cv_folds)
             
-            # Classification report
-            class_report = classification_report(y_test, y_pred, output_dict=True)
-            
-            # Confusion matrix
+            # Classification report & confusion matrix
+            class_report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
             conf_matrix = confusion_matrix(y_test, y_pred)
             
             results = {
-                "accuracy": float(accuracy),
+                "accuracy": float(acc),
+                "precision": float(prec),
+                "recall": float(rec),
+                "f1_score": float(f1),
                 "cv_mean": float(np.mean(cv_scores)),
                 "cv_std": float(np.std(cv_scores)),
                 "classification_report": class_report,
@@ -239,11 +288,20 @@ class ModelTrainer:
                 "probabilities": y_pred_proba.tolist() if y_pred_proba is not None else None
             }
             
-            print(f"📊 Model Performance:")
-            print(f"   Accuracy: {accuracy:.4f}")
-            print(f"   CV Score: {np.mean(cv_scores):.4f} (±{np.std(cv_scores):.4f})")
+            print(f"\n📊 Model Performance ({self.model_name}):")
+            print(f"   Accuracy:  {acc:.4f}")
+            print(f"   Precision: {prec:.4f}")
+            print(f"   Recall:    {rec:.4f}")
+            print(f"   F1 Score:  {f1:.4f}")
+            print(f"   CV Score:  {np.mean(cv_scores):.4f} (±{np.std(cv_scores):.4f})")
+            print(f"\n   Confusion Matrix:")
+            for row in conf_matrix:
+                print(f"   {row}")
             
-            logger.info(f"Model evaluation completed - Accuracy: {accuracy:.4f}")
+            logger.info(
+                f"Model evaluation completed — Accuracy: {acc:.4f}, "
+                f"Precision: {prec:.4f}, Recall: {rec:.4f}, F1: {f1:.4f}"
+            )
             
             return results
             
@@ -339,4 +397,3 @@ def train_ml_model(X: Union[pd.DataFrame, np.ndarray],
     """
     trainer = ModelTrainer(mode)
     return trainer.train_model(X, y, target_col, test_size)
-

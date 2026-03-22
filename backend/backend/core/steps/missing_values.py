@@ -7,6 +7,8 @@ Supports both interactive and automatic modes.
 
 import pandas as pd
 import numpy as np
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import MinMaxScaler
 from typing import Dict, List, Tuple, Optional
 import logging
 
@@ -102,6 +104,8 @@ class MissingValueHandler:
             col_info["handling_method"] = "skipped"
             col_info["action_taken"] = "No action taken"
             print(f"⏭️ Skipped {col}")
+        elif choice == "6":  # KNN Imputation
+            df, col_info = self._fill_with_knn(df, col, col_info)
         else:
             col_info["handling_method"] = "error"
             col_info["action_taken"] = "Invalid choice, skipped"
@@ -187,21 +191,52 @@ class MissingValueHandler:
                 logger.info(f"LLM: Using mode for categorical column {col}")
                 return "4"
         
-        # Fallback to original heuristics if no LLM recommendations
-        # High missing percentage (>50%) - drop column
-        if perc > 50:
-            logger.info(f"Auto-dropping column {col} (high missing percentage: {perc:.2f}%)")
-            return "1"
-        
-        # Numeric columns - use mean
+        # Fallback to tiered heuristics if no LLM recommendations
+        # ---------------------------------------------------------------
+        # Numeric columns: tiered strategy based on missing percentage
+        # ---------------------------------------------------------------
         if df[col].dtype in ["float64", "int64"]:
-            logger.info(f"Auto-filling numeric column {col} with mean")
-            return "2"
+            if perc >= 60:
+                logger.info(
+                    f"Auto-dropping numeric column {col} "
+                    f"(missing {perc:.1f}% ≥ 60% — too sparse to impute reliably)"
+                )
+                print(f"   Strategy: DROP (missing {perc:.1f}% ≥ 60%)")
+                return "1"
+            elif perc > 40:
+                logger.info(
+                    f"Auto-filling numeric column {col} with median "
+                    f"(missing {perc:.1f}% — high, using robust median)"
+                )
+                print(f"   Strategy: MEDIAN (missing {perc:.1f}%, range 40-60%)")
+                return "3"
+            elif perc > 5:
+                logger.info(
+                    f"Auto-filling numeric column {col} with KNNImputer "
+                    f"(missing {perc:.1f}% — moderate, using neighbour-based fill)"
+                )
+                print(f"   Strategy: KNN IMPUTER (missing {perc:.1f}%, range 5-40%)")
+                return "6"
+            else:
+                logger.info(
+                    f"Auto-filling numeric column {col} with mean "
+                    f"(missing {perc:.1f}% — low, simple mean is sufficient)"
+                )
+                print(f"   Strategy: MEAN (missing {perc:.1f}% ≤ 5%)")
+                return "2"
         
-        # Categorical columns - use mode
+        # ---------------------------------------------------------------
+        # Categorical columns: unchanged logic
+        # ---------------------------------------------------------------
         else:
-            logger.info(f"Auto-filling categorical column {col} with mode")
-            return "4"
+            if perc >= 60:
+                logger.info(f"Auto-dropping categorical column {col} (missing {perc:.1f}% ≥ 60%)")
+                print(f"   Strategy: DROP (missing {perc:.1f}% ≥ 60%)")
+                return "1"
+            else:
+                logger.info(f"Auto-filling categorical column {col} with mode")
+                print(f"   Strategy: MODE (categorical)")
+                return "4"
     
     def _drop_column(self, df: pd.DataFrame, col: str, col_info: Dict) -> Tuple[pd.DataFrame, Dict]:
         """Drop a column with missing values."""
@@ -216,6 +251,13 @@ class MissingValueHandler:
         """Fill missing values with mean."""
         if df[col].dtype in ["float64", "int64"]:
             mean_val = df[col].mean()
+            if pd.isna(mean_val) or df[col].isnull().all():
+                logger.warning(f"Column {col} is entirely null, dropping it instead")
+                print(f"⚠️ Column {col} is entirely null, dropping it instead")
+                df = df.drop(columns=[col])
+                col_info["handling_method"] = "dropped"
+                col_info["action_taken"] = f"Column {col} was entirely null, dropped"
+                return df, col_info
             df[col] = df[col].fillna(mean_val)
             col_info["handling_method"] = "mean_fill"
             col_info["action_taken"] = f"Filled with mean: {mean_val:.4f}"
@@ -232,6 +274,13 @@ class MissingValueHandler:
         """Fill missing values with median."""
         if df[col].dtype in ["float64", "int64"]:
             median_val = df[col].median()
+            if pd.isna(median_val) or df[col].isnull().all():
+                logger.warning(f"Column {col} is entirely null, dropping it instead")
+                print(f"⚠️ Column {col} is entirely null, dropping it instead")
+                df = df.drop(columns=[col])
+                col_info["handling_method"] = "dropped"
+                col_info["action_taken"] = f"Column {col} was entirely null, dropped"
+                return df, col_info
             df[col] = df[col].fillna(median_val)
             col_info["handling_method"] = "median_fill"
             col_info["action_taken"] = f"Filled with median: {median_val:.4f}"
@@ -247,7 +296,22 @@ class MissingValueHandler:
     def _fill_with_mode(self, df: pd.DataFrame, col: str, col_info: Dict) -> Tuple[pd.DataFrame, Dict]:
         """Fill missing values with mode."""
         try:
-            mode_val = df[col].mode()[0] if not df[col].mode().empty else "Unknown"
+            if df[col].isnull().all():
+                logger.warning(f"Column {col} is entirely null, dropping it instead")
+                print(f"⚠️ Column {col} is entirely null, dropping it instead")
+                df = df.drop(columns=[col])
+                col_info["handling_method"] = "dropped"
+                col_info["action_taken"] = f"Column {col} was entirely null, dropped"
+                return df, col_info
+            mode_series = df[col].mode()
+            if mode_series.empty or pd.isna(mode_series.iloc[0]):
+                logger.warning(f"Column {col} is entirely null, dropping it instead")
+                print(f"⚠️ Column {col} is entirely null, dropping it instead")
+                df = df.drop(columns=[col])
+                col_info["handling_method"] = "dropped"
+                col_info["action_taken"] = f"Column {col} was entirely null, dropped"
+                return df, col_info
+            mode_val = mode_series.iloc[0]
             df[col] = df[col].fillna(mode_val)
             col_info["handling_method"] = "mode_fill"
             col_info["action_taken"] = f"Filled with mode: {mode_val}"
@@ -258,6 +322,88 @@ class MissingValueHandler:
             col_info["handling_method"] = "error"
             col_info["action_taken"] = f"Error filling with mode: {str(e)}"
             print(f"⚠️ Error filling {col} with mode: {str(e)}")
+        return df, col_info
+    
+    def _fill_with_knn(self, df: pd.DataFrame, col: str, col_info: Dict) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Fill missing values using KNNImputer(n_neighbors=5).
+        
+        To prevent overflow from wide-ranged columns (e.g. PassengerId 1-891,
+        Fare 0-512) dominating KNN distance calculations, data is temporarily
+        normalised to [0,1] with MinMaxScaler before imputation, then
+        inverse-transformed back to restore the original scale.
+        """
+        if df[col].dtype not in ["float64", "int64"]:
+            col_info["handling_method"] = "error"
+            col_info["action_taken"] = "KNN imputation requires numeric column"
+            print(f"⚠️ Cannot apply KNN imputation to non-numeric column {col}")
+            return df, col_info
+        
+        if df[col].isnull().all():
+            logger.warning(f"Column {col} is entirely null, dropping instead")
+            print(f"⚠️ Column {col} is entirely null, dropping it instead")
+            df = df.drop(columns=[col])
+            col_info["handling_method"] = "dropped"
+            col_info["action_taken"] = f"Column {col} was entirely null, dropped"
+            return df, col_info
+        
+        try:
+            # Use ALL numeric columns as KNN features (better distance signal)
+            # but only write back to columns that actually had missing values.
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            cols_with_missing = [c for c in numeric_cols if df[c].isnull().any()]
+            
+            numeric_df = df[numeric_cols].copy()
+            
+            # Step 1 — Normalise to [0, 1] so no single column dominates distances
+            scaler = MinMaxScaler()
+            scaled = scaler.fit_transform(numeric_df)           # shape (n, features)
+            
+            # Step 2 — KNN imputation in normalised space
+            # suppress sklearn's internal matmul RuntimeWarning on some platforms
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                imputed_scaled = KNNImputer(n_neighbors=5).fit_transform(scaled)
+            
+            # Step 3 — Restore original scale
+            imputed = scaler.inverse_transform(imputed_scaled)
+            imputed_df = pd.DataFrame(imputed, columns=numeric_cols, index=df.index)
+            
+            # Step 4 — Write back ONLY the columns that had missing values
+            for c in cols_with_missing:
+                filled_col = imputed_df[c]
+                
+                # Sanity check: if any NaN/inf survived, fall back to median
+                if filled_col.isnull().any() or np.isinf(filled_col).any():
+                    fallback = df[c].median()
+                    logger.warning(
+                        f"KNN produced NaN/inf in column {c} — falling back to median ({fallback:.4f})"
+                    )
+                    print(f"   ⚠️ {c}: KNN produced invalid values, using median fallback")
+                    df[c] = df[c].fillna(fallback)
+                else:
+                    df[c] = filled_col
+            
+            col_info["handling_method"] = "knn_imputer"
+            col_info["action_taken"] = "Filled with MinMaxScaled KNNImputer (k=5)"
+            col_info["fill_value"] = "knn_neighbour_based"
+            print(
+                f"✅ Filled {col} with KNNImputer (k=5, "
+                f"{len(numeric_cols)} features scaled to [0,1])"
+            )
+            logger.info(f"Filled {col} with scaled KNNImputer (k=5)")
+        
+        except Exception as e:
+            # Hard fallback: use median for the single target column
+            logger.warning(f"KNN imputation failed for {col}: {e}. Falling back to median.")
+            print(f"⚠️ KNN failed for {col}, falling back to median")
+            median_val = df[col].median()
+            df[col] = df[col].fillna(median_val)
+            col_info["handling_method"] = "median_fill (knn_fallback)"
+            col_info["action_taken"] = f"KNN failed, filled with median: {median_val:.4f}"
+            col_info["fill_value"] = float(median_val)
+        
         return df, col_info
 
 

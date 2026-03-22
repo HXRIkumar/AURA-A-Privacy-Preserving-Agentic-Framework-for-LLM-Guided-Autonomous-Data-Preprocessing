@@ -21,8 +21,9 @@ import pandas as pd
 
 from backend.backend.core.pipeline import AuraPipeline
 from backend.backend.core.llm_service import get_llm_service
-from backend.backend.core.agent.core import AuraAgent
-from backend.backend.core.agent.tools import register_dataset, DATA_STORE, get_dataset
+# [UNIFIED] Replaced classic AuraAgent (core.py) with LangGraph-based agent (graph.py)
+from backend.backend.core.agent.graph import run_agentic_pipeline
+from backend.backend.core.agent.tools import register_dataset, DATA_STORE, get_dataset, cleanup_dataset
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ async def root():
 @app.get("/api/v1/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy"}
+    return {"status": "ok", "version": "2.0", "agent": "langgraph"}
 
 
 @app.post("/api/v1/upload")
@@ -684,22 +685,35 @@ async def run_agent(request: AgentRunRequest):
             raise HTTPException(status_code=404, detail="Dataset not found or not loaded.")
             
     try:
-        # 2. Instantiate and Run Agent
-        agent = AuraAgent(dataset_id)
-        final_state = agent.run()
+        # [UNIFIED] Replaced classic AuraAgent loop with LangGraph-based agent
+        # 2. Run LangGraph Agent
+        final_state = run_agentic_pipeline(dataset_id, verbose=True)
         
-        # 3. Format Response
+        # 3. Format Response from LangGraph output state
+        messages = final_state.get("messages", [])
         return {
-            "status": final_state.status,
-            "step_count": final_state.step_count,
-            "last_error": final_state.last_error,
-            "metadata_snapshot": final_state.metadata_snapshot,
-            "recent_history": final_state.messages[-10:] if final_state.messages else []
+            "status": final_state.get("status", "DONE"),
+            "step_count": len(final_state.get("steps_history", [])),
+            "last_error": final_state.get("error"),
+            "metadata_snapshot": final_state.get("metadata", {}),
+            "steps_history": final_state.get("steps_history", []),
+            "privacy_flags": final_state.get("privacy_flags", []),
+            "preprocessing_summary": final_state.get("preprocessing_summary", {}),
+            "agent_reasoning": final_state.get("agent_reasoning", []),
+            "recent_history": [
+                {"type": m.type, "content": str(m.content)[:500]}
+                for m in messages[-10:]
+            ] if messages else []
         }
         
     except Exception as e:
         logger.error(f"Agent execution failed: {e}")
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+    
+    finally:
+        # [MEMORY] Clean up DATA_STORE to prevent memory leaks
+        cleanup_dataset(dataset_id)
+        logger.info(f"Cleaned up dataset {dataset_id} after agent run")
 
 
 

@@ -32,7 +32,7 @@ class GroqLLMService:
             raise ValueError("Groq API key not found. Set GROQ_API_KEY environment variable.")
         
         self.client = Groq(api_key=self.api_key)
-        self.model = "llama-3.3-70b-versatile"  # Groq's latest powerful model
+        self.model = "llama-3.3-70b-versatile"
         
     def analyze_dataset_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """

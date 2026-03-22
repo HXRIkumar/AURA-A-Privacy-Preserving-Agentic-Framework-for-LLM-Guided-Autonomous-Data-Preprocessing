@@ -60,6 +60,14 @@ def update_dataset(dataset_id: str, df: pd.DataFrame) -> None:
     DATA_STORE[dataset_id] = df.copy()
     logger.info(f"Updated dataset {dataset_id} in Agent Tool Store")
 
+def cleanup_dataset(dataset_id: str) -> None:
+    """Remove a dataset from DATA_STORE to free memory after pipeline completes."""
+    if dataset_id in DATA_STORE:
+        del DATA_STORE[dataset_id]
+        logger.info(f"Cleaned up dataset {dataset_id} from Agent Tool Store")
+    else:
+        logger.warning(f"Cleanup requested for {dataset_id}, but it was not in DATA_STORE")
+
 # =============================================================================
 # Tool Definitions
 # =============================================================================
@@ -187,6 +195,19 @@ def run_preprocessing_step(
                     error_msg = (
                         f"Scaling failed: shape mismatch. Scaler returned {X_scaled.shape}, "
                         f"expected columns match with {len(numeric_cols)} numeric columns."
+                    )
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                # Verify column alignment after reconstruction
+                reconstructed_numeric = processed_df.select_dtypes(include=[np.number]).columns.tolist()
+                if target_col and target_col in reconstructed_numeric:
+                    reconstructed_numeric.remove(target_col)
+                if reconstructed_numeric != numeric_cols:
+                    error_msg = (
+                        f"Scaling column alignment error: post-reconstruction numeric columns "
+                        f"{reconstructed_numeric} do not match the original numeric columns "
+                        f"{numeric_cols}. Data may be corrupted."
                     )
                     logger.error(error_msg)
                     raise ValueError(error_msg)
