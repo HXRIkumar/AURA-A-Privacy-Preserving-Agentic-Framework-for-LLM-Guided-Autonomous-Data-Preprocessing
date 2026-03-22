@@ -513,7 +513,7 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 
 <br/>
 
-**Built with ❤️ by [Hari Kumar](https://github.com/HXRIkumar)**
+**Built with ❤️ by [Hari K](https://github.com/HXRIkumar)**
 
 <br/>
 
