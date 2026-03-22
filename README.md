@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Typing SVG](https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=600&size=22&duration=3000&pause=1000&color=185FA5&center=true&vCenter=true&multiline=true&repeat=true&width=750&height=100&lines=🔒+Zero-Trust+Privacy+Firewall+—+No+Raw+Data+Exposure;🧠+LangGraph+Agentic+Controller+—+Observe+→+Reason+→+Act;📊+88.3%25+Mean+Accuracy+Across+7+Benchmark+Datasets;🛡️+Metadata-Only+LLM+Reasoning+—+Privacy+by+Design)](https://git.io/typing-svg)
+[![Typing SVG](https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=600&size=16&duration=3000&pause=1000&color=185FA5&center=true&vCenter=true&multiline=true&repeat=true&width=750&height=100&lines=Zero-Trust+Privacy+Firewall+—+No+Raw+Data+Exposure;LangGraph+Agentic+Controller+—+Observe+%E2%86%92+Reason+%E2%86%92+Act;88.3%25+Mean+Accuracy+Across+7+Benchmark+Datasets;Metadata-Only+LLM+Reasoning+—+Privacy+by+Design)](https://git.io/typing-svg)
 
 <br/>
 
