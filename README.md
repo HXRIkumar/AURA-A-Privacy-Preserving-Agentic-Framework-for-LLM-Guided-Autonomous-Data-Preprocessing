@@ -67,7 +67,7 @@ flowchart TB
     subgraph AGENT["🧠 LangGraph Agentic Controller"]
         direction TB
         Observe["📊 Observe\n(Metadata Extraction)"]
-        Reason["🤔 Reason\n(LLM Decision via Groq)"]
+        Reason["Reason\n(LLM Decision via Groq)"]
         Act["⚙️ Act\n(Tool Execution)"]
         Observe --> Reason --> Act --> Observe
     end
